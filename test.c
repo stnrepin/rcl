@@ -76,7 +76,7 @@ static void do_work(int nb_cnts) {
     cnt_ids = malloc(sizeof(pthread_t) * nb_cnts);
 
     for (i = 0; i < nb_cnts; i++) {
-        cnt_ids[i] = rcl_client_run(process_client, NULL);
+        rcl_client_run(&cnt_ids[i], process_client, NULL);
     }
 
     for (i = 0; i < nb_cnts; i++) {

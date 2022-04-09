@@ -1,5 +1,5 @@
 CC ?= gcc
-CCFLAGS := -std=c11
+CCFLAGS := -std=c11 -pthread
 DBGFLAGS := -g -Wall -Wextra -Wpedantic
 
 ifdef RCL_DEBUG_USE_PTHREAD_LOCK
