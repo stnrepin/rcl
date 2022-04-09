@@ -1,6 +1,11 @@
 CC ?= gcc
 CCFLAGS := -std=c11
 DBGFLAGS := -g -Wall -Wextra -Wpedantic
+
+ifdef RCL_DEBUG_USE_PTHREAD_LOCK
+	CCFLAGS += -DRCL_DEBUG_USE_PTHREAD_LOCK
+endif
+
 CCOBJFLAGS := $(CCFLAGS) -c
 
 BIN_PATH := build
