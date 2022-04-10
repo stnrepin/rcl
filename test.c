@@ -5,9 +5,6 @@
 #include <stdint.h>
 
 #include "rcl.h"
-#include "rcl_errno.h"
-
-#define LOG_ERROR() printf("fatal error: %s\n", rcl_errno_str())
 
 #define NB_REQUESTS 1000000 // 1M
 #define NB_LOOPS_PER_CLIENT 16
@@ -49,9 +46,8 @@ int main(int argc, char **argv) {
     int rc, nb_cnts;
     struct rcl_cpu_config cpu_cfg;
 
-    if (argc < 2) {
-        rcl_errno_set(RCL_EARGS);
-        LOG_ERROR();
+    if (argc < 3) {
+        printf("invalid args: no number of client\n");
         return 1;
     }
 
@@ -61,7 +57,6 @@ int main(int argc, char **argv) {
 
     rc = parse_cpu_config(&cpu_cfg, argc, argv);
     if (rc != 0) {
-        LOG_ERROR();
         return 1;
     }
 
@@ -141,22 +136,12 @@ static void process_client_critical(void *arg) {
 }
 
 static int parse_cpu_config(struct rcl_cpu_config *cpu_cfg, int argc, char **argv) {
-    size_t i;
-
-    if (argc < 2) {
-        rcl_errno_set(RCL_EARGS);
+    if (argc < 1) {
+        printf("invalid args: no server cpu\n");
         return 1;
     }
 
     cpu_cfg->srv_cpu = atoi(argv[0]);
-
-    cpu_cfg->cnt_cpus_sz = argc - 1;
-    cpu_cfg->cnt_cpus = malloc(sizeof(rcl_cpu_t) * cpu_cfg->cnt_cpus_sz);
-
-    argv++;
-    for (i = 0; i < cpu_cfg->cnt_cpus_sz; i++) {
-        cpu_cfg->cnt_cpus[i] = atoi(argv[i]);
-    }
 
     return 0;
 }

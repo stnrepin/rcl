@@ -16,8 +16,6 @@ typedef void (rcl_callback_t)(void *);
 
 struct rcl_cpu_config {
     rcl_cpu_t srv_cpu;
-    rcl_cpu_t *cnt_cpus;
-    size_t cnt_cpus_sz;
 };
 
 struct rcl_server;
