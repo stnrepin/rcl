@@ -20,7 +20,6 @@ struct rcl_request {
     struct rcl_lock *lock;
     void *arg;
     rcl_callback_t *volatile cb;
-    void *volatile owner;
 };
 
 struct rcl_thread {
@@ -48,7 +47,7 @@ enum server_state {
 };
 
 struct rcl_server {
-    volatile enum server_state state; // atomic?
+    volatile enum server_state state;
     volatile int alive;
     volatile uint64_t timestamp;
     atomic_int ready_and_servicing_count;
@@ -138,9 +137,6 @@ int rcl_init(struct rcl_cpu_config *cpu_cfg) {
     g_rcl_cfg.cpu_cfg = *cpu_cfg;
     g_rcl_cfg.next_cnt_cpu = 0;
 
-    // Use only one server thread and multiple clients.
-    // Run them on different cpus.
-
     srv_cpu = cpu_cfg->srv_cpu;
     init_server();
     run_manager_on(srv_cpu);
@@ -179,7 +175,7 @@ static void run_manager_on(rcl_cpu_t cpu) {
     create_thread_on(cpu, NULL, NULL, manager_thread, srv);
 
     while (srv->state == SERVER_STATE_STARTING) {
-        //pthread_cond_wait(&srv->state_cond, &srv->state_lock);
+        sched_yield();
     }
 }
 
@@ -392,8 +388,6 @@ static void *manager_thread(void *arg) {
         srv->wakeup = 0;
 
         if (!srv->alive) {
-            printf("info: no more alive srv threads\n");
-
             ensure_has_free_servicing_thread(srv);
 
             srv->alive = 1;
