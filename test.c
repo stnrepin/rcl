@@ -1,3 +1,4 @@
+#include <assert.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,6 +25,24 @@ static int parse_cpu_config(struct rcl_cpu_config *cpu_cfg, int argc, char **arg
 
 static inline uint64_t calc_expected_shared(int nb_cnts) {
     return SHARED_INC * nb_cnts * NB_REQUESTS * NB_LOOPS_PER_CLIENT;
+}
+
+struct stopwatch {
+    struct timespec start;
+    struct timespec end;
+};
+
+static void stopwatch_start(struct stopwatch *sw) {
+    clock_gettime(CLOCK_REALTIME, &sw->start);
+}
+
+static void stopwatch_stop(struct stopwatch *sw) {
+    clock_gettime(CLOCK_REALTIME, &sw->end);
+}
+
+static uint64_t stopwatch_get_elapsed_ns(struct stopwatch *sw) {
+    const uint64_t billion = 1000000000;
+    return (sw->end.tv_sec - sw->start.tv_sec) * billion + (sw->end.tv_nsec - sw->start.tv_nsec);
 }
 
 int main(int argc, char **argv) {
@@ -70,21 +89,30 @@ int main(int argc, char **argv) {
 }
 
 static void do_work(int nb_cnts) {
-    int i;
+    int i, rc;
     rcl_id_t *cnt_ids;
+    struct stopwatch sw;
+    uint64_t expected;
 
     cnt_ids = malloc(sizeof(pthread_t) * nb_cnts);
 
+    stopwatch_start(&sw);
     for (i = 0; i < nb_cnts; i++) {
-        rcl_client_run(&cnt_ids[i], process_client, NULL);
+        rc = rcl_client_run(&cnt_ids[i], process_client, NULL);
+        assert(rc == 0);
     }
 
     for (i = 0; i < nb_cnts; i++) {
-        rcl_client_join(cnt_ids[i]);
+        rc = rcl_client_join(cnt_ids[i]);
+        assert(rc == 0);
     }
+    stopwatch_stop(&sw);
 
+    expected = calc_expected_shared(nb_cnts);
     printf("Actual `shared`   : %ld\n", g_shared);
-    printf("Expected `shared` : %ld\n", calc_expected_shared(nb_cnts));
+    printf("Expected `shared` : %ld\n", expected);
+    printf("Actual = expected : %d\n", g_shared == expected);
+    printf("Elapsed (ns)      : %ld\n", stopwatch_get_elapsed_ns(&sw));
 }
 
 static void *process_client(void *arg) {
@@ -96,6 +124,7 @@ static void *process_client(void *arg) {
         rcl_pause();
     }
 
+    printf("info: run client 2\n");
     for (i = 0; i < NB_REQUESTS; i++) {
         rcl_request(&g_lck, process_client_critical, NULL);
     }

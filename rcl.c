@@ -66,13 +66,12 @@ struct rcl_client_global_ctx {
 };
 
 struct rcl_server_global_ctx {
-    int nb_clients;
-    int next_client_index;
+    volatile int next_client_index;
+    volatile struct rcl_thread *thread;
 };
 
 struct rcl_global_ctx {
     int is_srv;
-    struct rcl_thread *thread; // unused
     struct rcl_server *srv;
     union {
         struct rcl_server_global_ctx srv_ctx;
@@ -107,11 +106,12 @@ static inline long sys_futex(void *addr, int op, int val, struct timespec *to) {
 static inline void set_priority(pthread_t id, unsigned int prio) {
     int rc = pthread_setschedprio(id, prio);
     if (rc != 0) {
-        printf("fatal error: unable to set prio %d for %ld", prio, id);
+        printf("fatal error: unable to set prio %d for %ld (rc=%d)\n", prio, id, rc);
     }
 }
 
 static void create_thread_on(rcl_cpu_t cpu, pthread_t *id, pthread_attr_t *attr, void *(*f)(void *), void *arg) {
+    int rc;
     pthread_t def_id;
     cpu_set_t cpuset;
     pthread_attr_t def_attr;
@@ -126,7 +126,11 @@ static void create_thread_on(rcl_cpu_t cpu, pthread_t *id, pthread_attr_t *attr,
         pthread_attr_init(attr);
     }
     pthread_attr_setaffinity_np(attr, sizeof(cpu_set_t), &cpuset);
-    pthread_create(id, attr, f, arg);
+    rc = pthread_create(id, attr, f, arg);
+    printf("info: create thread %ld on %d\n", *id, cpu);
+    if (rc != 0) {
+        printf("fatal: cant create thread on %d (rc=%d)\n", cpu, rc);
+    }
 }
 
 int rcl_init(struct rcl_cpu_config *cpu_cfg) {
@@ -155,6 +159,7 @@ void init_server() {
     srv->timestamp = 1;
     atomic_init(&srv->ready_and_servicing_count, 0);
     srv->reqs = malloc(sizeof(struct rcl_request) * RCL_MAX_CLIENT_COUNT);
+    memset(srv->reqs, 0, sizeof(struct rcl_request) * RCL_MAX_CLIENT_COUNT);
     atomic_init(&srv->free_servicing_count, 0);
     srv->all_threads = NULL;
     srv->prepared_threads = NULL;
@@ -162,6 +167,8 @@ void init_server() {
 
     g_thread_ctx.is_srv = 1;
     g_thread_ctx.srv = srv;
+
+    g_thread_ctx.srv_ctx.next_client_index = 0;
 }
 
 static void run_manager_on(rcl_cpu_t cpu) {
@@ -194,7 +201,6 @@ void *client_runner(void *a) {
 
     g_thread_ctx.is_srv = 0;
     g_thread_ctx.srv = arg->srv;
-    g_thread_ctx.thread = NULL;
     g_thread_ctx.cnt_ctx.index = arg->index;
 
     g_thread_ctx.srv->reqs[g_thread_ctx.cnt_ctx.index].cb = NULL;
@@ -204,12 +210,15 @@ void *client_runner(void *a) {
 }
 
 int rcl_client_run(rcl_id_t *id, rcl_client_t *f, void *arg) {
+    int i;
     struct client_runner_arg *runner_arg;
     cpu_set_t cpuset;
     pthread_attr_t attr;
 
     CPU_ZERO(&cpuset);
-    CPU_XOR(&cpuset, &cpuset, &cpuset);
+    for (i = 0; i < CPU_SETSIZE; i++) {
+        CPU_SET(i, &cpuset);
+    }
     CPU_CLR(g_rcl_cfg.cpu_cfg.srv_cpu, &cpuset);
     pthread_attr_init(&attr);
     pthread_attr_setaffinity_np(&attr, sizeof(cpu_set_t), &cpuset);
@@ -239,12 +248,13 @@ void rcl_request(struct rcl_lock *lck, rcl_callback_t* cb, void *arg) {
         while (!atomic_compare_exchange_weak_explicit(
                     &lck->locked, &atomic_exp, 1,
                     memory_order_relaxed, memory_order_relaxed)) {
-            g_thread_ctx.thread->timestamp = srv->timestamp;
+            g_thread_ctx.srv_ctx.thread->timestamp = srv->timestamp;
             sched_yield();
         }
 
         cb(arg);
         atomic_store_explicit(&lck->locked, 0, memory_order_relaxed);
+        printf("info: is_srv\n");
         return;
     }
 
@@ -259,6 +269,44 @@ void rcl_request(struct rcl_lock *lck, rcl_callback_t* cb, void *arg) {
 }
 
 static void *servicing_thread(void *arg) {
+    struct rcl_thread *th;
+    struct rcl_server *srv;
+    struct rcl_request *req;
+    struct rcl_lock *lck;
+    int i, tmp;
+
+    th = arg;
+    srv = th->srv;
+
+    atomic_fetch_sub_explicit(&srv->free_servicing_count, 1, memory_order_relaxed);
+
+    while (srv->state >= SERVER_STATE_STARTING) {
+        srv->alive = 1;
+        th->timestamp = srv->timestamp;
+
+        for (i = 0; i < RCL_MAX_CLIENT_COUNT; i++) {
+            req = &srv->reqs[i];
+            if (req->cb) {
+                lck = req->lock;
+                tmp = 0;
+                if (!atomic_compare_exchange_strong_explicit(
+                            &lck->locked, &tmp, 1,
+                            memory_order_relaxed, memory_order_relaxed)) {
+                    req->cb(req->arg);
+                    req->cb = NULL;
+                    atomic_store_explicit(&lck->locked, 0, memory_order_relaxed);
+                }
+            }
+        }
+
+        atomic_fetch_add(&srv->free_servicing_count, 1);
+        if (atomic_load_explicit(&srv->ready_and_servicing_count, memory_order_relaxed) > 1) {
+            printf("error: not implemented slow path\n");
+        }
+    }
+
+    printf("info: servicing exit\n");
+
     return NULL;
 }
 
@@ -291,6 +339,8 @@ static void ensure_has_free_servicing_thread(struct rcl_server *srv) {
     atomic_fetch_add_explicit(&srv->ready_and_servicing_count, 1, memory_order_seq_cst);
     elected->servicing = 1;
 
+    g_thread_ctx.srv_ctx.thread = elected;
+
     if (has_prepared) {
         sys_futex(&elected->servicing, FUTEX_WAKE_PRIVATE, 1, NULL);
     }
@@ -302,13 +352,15 @@ static void ensure_has_free_servicing_thread(struct rcl_server *srv) {
         pthread_attr_setschedparam(&attr, &param);
 
         create_thread_on(g_rcl_cfg.cpu_cfg.srv_cpu, &elected->tid, &attr, servicing_thread, elected);
+        printf("info: (ensure) run new servicing %ld\n", elected->tid);
     }
 }
 
 static void *manager_thread(void *arg) {
-    int rc, done;
+    int rc, done, state;
     struct rcl_server *srv;
     pthread_attr_t attr;
+    pthread_t backup_id;
     struct sched_param param;
     struct rcl_thread *cur;
     struct timespec manager_to;
@@ -330,7 +382,7 @@ static void *manager_thread(void *arg) {
     pthread_attr_setschedpolicy(&attr, SCHED_FIFO);
     pthread_attr_setschedparam(&attr, &param);
 
-    create_thread_on(g_rcl_cfg.cpu_cfg.srv_cpu, NULL, &attr, backup_thread, srv);
+    create_thread_on(g_rcl_cfg.cpu_cfg.srv_cpu, &backup_id, &attr, backup_thread, srv);
 
     ensure_has_free_servicing_thread(srv);
 
@@ -361,9 +413,9 @@ static void *manager_thread(void *arg) {
                     }
                     cur = cur->next;
                 }
-            }
-            if (!done) {
-                srv->timestamp++;
+                if (!done) {
+                    srv->timestamp++;
+                }
             }
         }
         else {
@@ -374,6 +426,23 @@ static void *manager_thread(void *arg) {
         manager_to.tv_nsec= 50000000;
         sys_futex(&srv->wakeup, FUTEX_WAIT_PRIVATE, 0, &manager_to);
     }
+
+    cur = srv->all_threads;
+    while (cur) {
+        state = atomic_exchange(&cur->servicing, 1);
+        if (!state) {
+            atomic_fetch_add_explicit(&srv->free_servicing_count, 1, memory_order_relaxed);
+            atomic_fetch_add_explicit(&srv->ready_and_servicing_count, 1, memory_order_seq_cst);
+            sys_futex(&cur->servicing, FUTEX_WAKE_PRIVATE, 1, NULL);
+        }
+        cur = cur->next;
+    }
+
+    pthread_join(backup_id, NULL);
+
+    srv->state = SERVER_STATE_DOWN;
+
+    printf("info: manager exit\n");
 
     return NULL;
 }
@@ -387,6 +456,7 @@ static void *backup_thread(void *arg) {
         sys_futex(&srv->wakeup, FUTEX_WAKE_PRIVATE, 1, NULL);
     }
 
+    printf("info: backup exit\n");
     return NULL;
 }
 
@@ -398,9 +468,7 @@ int rcl_init(struct rcl_cpu_config *cpu_cfg) {
 }
 
 int rcl_client_run(rcl_id_t *id, rcl_client_t *f, void *arg) {
-    rcl_id_t id;
-    pthread_create(&id, NULL, f, arg);
-    return id;
+    return pthread_create(id, NULL, f, arg);
 }
 
 int rcl_client_join(rcl_id_t id) {
@@ -411,11 +479,10 @@ void rcl_lock_init(struct rcl_lock *lck) {
     pthread_mutex_init(&lck->inner, NULL);
 }
 
-int rcl_request(struct rcl_lock *lck, rcl_callback_t* cb, void *arg) {
+void rcl_request(struct rcl_lock *lck, rcl_callback_t* cb, void *arg) {
     pthread_mutex_lock(&lck->inner);
     cb(arg);
     pthread_mutex_unlock(&lck->inner);
-    return 0;
 }
 
 
