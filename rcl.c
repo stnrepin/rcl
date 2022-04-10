@@ -12,6 +12,8 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
+#include "llist.h"
+
 #define RCL_MAX_CLIENT_COUNT 64
 
 #ifndef RCL_DEBUG_USE_PTHREAD_LOCK
@@ -28,16 +30,7 @@ struct rcl_thread {
     uint64_t timestamp;
     int servicing;
     struct rcl_thread *next;
-};
-
-struct rcl_thread_ll_stack {
-    struct llist_head *head;
-    struct rcl_thread *thread;
-};
-
-struct rcl_thread_list {
-    struct list_head *head;
-    struct rcl_thread thread;
+    struct llist_node ll_node;
 };
 
 enum server_state {
@@ -54,7 +47,7 @@ struct rcl_server {
     struct rcl_request *reqs;
 
     struct rcl_thread *all_threads;
-    struct rcl_thread *prepared_threads;
+    struct llist_head prepared_threads;
     atomic_int free_servicing_count;
 
     int wakeup;
@@ -158,7 +151,7 @@ void init_server() {
     memset(srv->reqs, 0, sizeof(struct rcl_request) * RCL_MAX_CLIENT_COUNT);
     atomic_init(&srv->free_servicing_count, 0);
     srv->all_threads = NULL;
-    srv->prepared_threads = NULL;
+    init_llist_head(&srv->prepared_threads);
     srv->wakeup = 0;
 
     g_thread_ctx.is_srv = 1;
@@ -250,7 +243,6 @@ void rcl_request(struct rcl_lock *lck, rcl_callback_t* cb, void *arg) {
 
         cb(arg);
         atomic_store_explicit(&lck->locked, 0, memory_order_relaxed);
-        printf("info: is_srv\n");
         return;
     }
 
@@ -269,12 +261,13 @@ static void *servicing_thread(void *arg) {
     struct rcl_server *srv;
     struct rcl_request *req;
     struct rcl_lock *lck;
-    int i, tmp;
+    int i, tmp, time;
 
     th = arg;
     srv = th->srv;
 
     atomic_fetch_sub_explicit(&srv->free_servicing_count, 1, memory_order_relaxed);
+    time = 0;
 
     while (srv->state >= SERVER_STATE_STARTING) {
         srv->alive = 1;
@@ -297,7 +290,24 @@ static void *servicing_thread(void *arg) {
 
         atomic_fetch_add(&srv->free_servicing_count, 1);
         if (atomic_load_explicit(&srv->ready_and_servicing_count, memory_order_relaxed) > 1) {
-            printf("error: not implemented slow path\n");
+            if (srv->free_servicing_count > 0) {
+                tmp = 1;
+                if (atomic_compare_exchange_strong_explicit(
+                            &th->servicing, &tmp, 0,
+                            memory_order_relaxed, memory_order_relaxed)) {
+                    atomic_fetch_sub(&srv->ready_and_servicing_count, 1);
+                    llist_add(&th->ll_node, &srv->prepared_threads);
+                    sys_futex(&th->servicing, FUTEX_WAIT_PRIVATE, 0, NULL);
+                    atomic_fetch_add_explicit(&srv->free_servicing_count, 1, memory_order_relaxed);
+                }
+            } else {
+                atomic_fetch_add_explicit(&srv->free_servicing_count, 1, memory_order_relaxed);
+                if (time++ > 1000) {
+                    sched_yield();
+                    time = 0;
+                }
+                atomic_fetch_sub_explicit(&srv->free_servicing_count, 1, memory_order_relaxed);
+            }
         }
     }
 
@@ -320,10 +330,13 @@ static void ensure_has_free_servicing_thread(struct rcl_server *srv) {
         return;
     }
 
-    elected = srv->prepared_threads;
-    has_prepared = (elected != NULL);
+    // There are always only one servicing thread. No ABA.
+    has_prepared = !llist_empty(&srv->prepared_threads);
 
-    if (!has_prepared) {
+    if (has_prepared) {
+        elected = llist_entry(llist_del_first(&srv->prepared_threads), struct rcl_thread, ll_node);
+    }
+    else {
         elected = malloc(sizeof(*elected));
         elected->srv = srv;
         elected->next = srv->all_threads;
