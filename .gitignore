@@ -1,2 +1,4 @@
 build/
 test-build/
+report/out/*
+!report/out/main.pdf

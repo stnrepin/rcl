@@ -1,0 +1,89 @@
+\documentclass[a4paper,14pt]{extarticle}
+\usepackage{rotating}
+\usepackage{verbatim}
+\input{inc/preamble.tex}
+
+\usepackage[outputdir=out,cache=false]{minted}
+
+\begin{document}
+
+\input{inc/titlepage}
+
+\renewcommand*{\thepage}{}
+\tableofcontents
+\clearpage
+\renewcommand*{\thepage}{\arabic{page}}
+
+\setcounter{page}{3}
+
+\section{Задание}
+
+Реализовать алгоритм Remote Core Blocking. Разработать простой тест. Оценить
+эффективность.
+
+\section{Выполнение работы}
+
+Алгоритм Remote Core Locking (RCL) написан на языке C11 для ОС Linux x64 на
+основе публикации \cite{lozi12}.
+
+RCL -- это алгоритм блокировки, обеспечивающий высокую производительность на
+многоядерных системах за счет исполнения критических секций на
+специализированных ядрах, заменяя захват блокировки на вызов процедуры. Такой
+подход повышает эффективность использования L1 и L2 кэшей процессора.
+
+Кроме того был реализован тест, запускающий $N$ потоков, каждый из которых
+инкрементирует общую переменную $M$ раз на величину $S$. По завершению тестовая
+программа сверяет полученное значение переменной с ожидаемым ($N\cdot M\cdot
+S$). Измеряется время с момента запуска потоков до их завершения.
+
+На графике ниже показана зависимость времени выполнения от числа потоков для
+двух реализаций тестовой программы: с использованием RCL и мьютексов. Из
+графика следует, что с ростом contention, когда все больше потоков соревнуются
+за доступ к критической секции, RCL начинает выигрывать реализацию на
+мьютексах. При малом числе потоков мьютексы оказываются быстрее из-за накладных
+расходов RCL.
+
+Параметры стенда представлены в таблице ниже:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{|c|c|}
+    \hline
+    Название & Значение \\
+    \hline
+    ОС & Arch Linux (Linux 5.16 x64) \\
+    \hline
+    Процессор & Intel Core i7 11700 \\
+    \hline
+    Число ядер & 16 (8) \\
+    \hline
+\end{tabular}
+\end{table}
+
+\addimghere{res/plot.png}{1}{}{}
+
+\section{Разделение работы в бригаде}
+
+Вместе выяснили и обсудили суть алгоритма, особенности его реализации.
+Определились с интерфейсом библиотеки и ее тестированием.
+
+Дмитрий Николаев выполнил разработку тестовой утилиты, скриптов для анализа
+результатов и Servicing Thread.
+
+Степан Репин реализовал остальные части библиотеки: Manager Thread, Backup
+Thread, инициализацию, запуск. А также выполнил отладку.
+
+\begingroup
+\renewcommand{\section}[2]{\anonsection{Список использованных источников}}
+\begin{thebibliography}{00}
+
+\bibitem{lozi12}
+    J.-P. Lozi, F. David, G. Thomas, J. Lawall, G. Muller. Remote Core Locking:
+    Migrating Critical-Section Execution to Improve the Performance of
+    Multithreaded Applications // USENIX ATC 12. - 2012. - P. 65-76
+
+\end{thebibliography}
+\endgroup
+
+\end{document}
+
